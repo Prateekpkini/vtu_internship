@@ -3,11 +3,13 @@ import sys
 import time
 import argparse
 import logging
+import threading
 import smtplib
 from email.message import EmailMessage
 from datetime import datetime
 import requests
 from dotenv import load_dotenv
+from flask import Flask, jsonify, render_template_string
 
 # Load environment variables from .env file if available
 load_dotenv()
@@ -20,6 +22,7 @@ SENDER_EMAIL = os.getenv("SENDER_EMAIL", "your_email@gmail.com")
 SENDER_PASSWORD = os.getenv("SENDER_PASSWORD", "your_app_password")
 RECIPIENT_EMAIL = os.getenv("RECIPIENT_EMAIL", "prateekpkini2005@gmail.com")
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL_SECONDS", "60"))
+PORT = int(os.getenv("PORT", "10000"))
 
 # Setup Logging
 logging.basicConfig(
@@ -28,6 +31,95 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S"
 )
 logger = logging.getLogger("VTU_Monitor")
+
+# Global Monitor State (for web dashboard & health check)
+monitor_status = {
+    "is_running": True,
+    "last_check_time": None,
+    "total_tracked": 0,
+    "latest_internship": None,
+    "total_alerts_sent": 0,
+    "errors_count": 0,
+    "recipient_email": RECIPIENT_EMAIL,
+}
+status_lock = threading.Lock()
+
+# Flask App for Render Port Binding
+app = Flask(__name__)
+
+HTML_DASHBOARD = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VTU Internship Monitor</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background: #0f172a; color: #f8fafc; padding: 20px; margin: 0; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+        .card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 28px; max-width: 580px; width: 100%; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.3); }
+        .badge { background: #10b981; color: #ffffff; padding: 4px 10px; border-radius: 9999px; font-size: 13px; font-weight: 600; display: inline-block; }
+        h1 { margin-top: 12px; margin-bottom: 6px; font-size: 22px; color: #ffffff; }
+        p.sub { color: #94a3b8; font-size: 14px; margin-top: 0; margin-bottom: 20px; }
+        .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 20px; }
+        .stat-box { background: #0f172a; padding: 14px; border-radius: 8px; border: 1px solid #334155; }
+        .stat-label { font-size: 12px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
+        .stat-value { font-size: 18px; font-weight: bold; color: #38bdf8; }
+        .detail-box { background: #0f172a; padding: 14px; border-radius: 8px; border: 1px solid #334155; font-size: 14px; margin-bottom: 16px; }
+        .btn { display: inline-block; background: #2563eb; color: #ffffff; text-decoration: none; padding: 8px 16px; border-radius: 6px; font-weight: 600; font-size: 13px; margin-top: 8px; }
+        .btn:hover { background: #1d4ed8; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <span class="badge">● Active &amp; Polling</span>
+        <h1>VTU Internship Monitor</h1>
+        <p class="sub">Automated real-time scanner for Free &amp; Remote VTU internships</p>
+        
+        <div class="stat-grid">
+            <div class="stat-box">
+                <div class="stat-label">Tracked Internships</div>
+                <div class="stat-value">{{ status.total_tracked }}</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-label">Alerts Fired</div>
+                <div class="stat-value">{{ status.total_alerts_sent }}</div>
+            </div>
+        </div>
+
+        <div class="detail-box">
+            <strong>📧 Recipient:</strong> {{ status.recipient_email }}<br>
+            <strong>⏱️ Last Checked:</strong> {{ status.last_check_time or "Initializing..." }}<br>
+            {% if status.latest_internship %}
+            <div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #334155;">
+                <strong>🆕 Latest Detected:</strong><br>
+                {{ status.latest_internship }}
+            </div>
+            {% endif %}
+        </div>
+
+        <a class="btn" href="{{ portal_url }}" target="_blank">Open VTU Portal Filter &rarr;</a>
+    </div>
+</body>
+</html>
+"""
+
+
+@app.route("/")
+def home():
+    """Render status page to satisfy Render HTTP health checks."""
+    with status_lock:
+        current_status = dict(monitor_status)
+    return render_template_string(HTML_DASHBOARD, status=current_status, portal_url=PORTAL_URL)
+
+
+@app.route("/health")
+def health():
+    """JSON health endpoint for uptime monitors."""
+    with status_lock:
+        return jsonify({
+            "status": "healthy",
+            "monitor": monitor_status
+        }), 200
 
 
 def fetch_latest_internships():
@@ -52,7 +144,6 @@ def fetch_latest_internships():
         response.raise_for_status()
         data = response.json()
 
-        # The API wraps listings under data.data
         if isinstance(data, dict) and "data" in data:
             raw_data = data["data"]
             if isinstance(raw_data, dict) and "data" in raw_data:
@@ -64,6 +155,8 @@ def fetch_latest_internships():
         return []
     except Exception as e:
         logger.error(f"Error fetching from VTU API: {e}")
+        with status_lock:
+            monitor_status["errors_count"] += 1
         return []
 
 
@@ -74,7 +167,6 @@ def build_email_content(new_internships):
     count = len(new_internships)
     subject = f"🚨 VTU Internship Alert: {count} New Free/Remote Listing{'s' if count > 1 else ''} Found!"
 
-    # Plain text format
     text_lines = [
         f"🚨 A new internship update was detected on the VTU Portal!",
         f"",
@@ -107,7 +199,6 @@ def build_email_content(new_internships):
 
     text_body = "\n".join(text_lines)
 
-    # HTML format
     items_html = ""
     for item in new_internships:
         title = item.get("title", "Untitled Internship")
@@ -162,7 +253,7 @@ def send_email_alert(new_internships):
     """
     if SENDER_EMAIL in ("your_email@gmail.com", "") or SENDER_PASSWORD in ("your_app_password", ""):
         logger.warning(
-            "⚠️  Gmail credentials not configured! Please set SENDER_EMAIL and SENDER_PASSWORD in your .env file."
+            "⚠️  Gmail credentials not configured! Please set SENDER_EMAIL and SENDER_PASSWORD in your .env or environment variables."
         )
         logger.info(f"Notification would have been sent to: {RECIPIENT_EMAIL}")
         return False
@@ -181,6 +272,8 @@ def send_email_alert(new_internships):
             server.login(SENDER_EMAIL, SENDER_PASSWORD)
             server.send_message(msg)
         logger.info(f"✅ Instant email alert sent successfully to {RECIPIENT_EMAIL} ({len(new_internships)} new listing(s))")
+        with status_lock:
+            monitor_status["total_alerts_sent"] += 1
         return True
     except Exception as e:
         logger.error(f"❌ Failed to send email via SMTP: {e}")
@@ -189,10 +282,10 @@ def send_email_alert(new_internships):
 
 def run_monitor(single_run=False):
     """
-    Main monitor loop. Polls VTU internships at CHECK_INTERVAL seconds.
+    Background worker loop. Polls VTU internships at CHECK_INTERVAL seconds.
     """
     logger.info("=" * 60)
-    logger.info("🚀 Starting VTU Internship Monitor")
+    logger.info("🚀 Starting VTU Internship Monitor Background Thread")
     logger.info(f"📍 Target Portal : {PORTAL_URL}")
     logger.info(f"📧 Recipient     : {RECIPIENT_EMAIL}")
     logger.info(f"⏱️  Interval      : Every {CHECK_INTERVAL} seconds")
@@ -201,14 +294,23 @@ def run_monitor(single_run=False):
     # Initial snapshot
     initial_items = fetch_latest_internships()
     known_ids = {item["id"] for item in initial_items if "id" in item}
+
+    with status_lock:
+        monitor_status["last_check_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        monitor_status["total_tracked"] = len(known_ids)
+        if initial_items:
+            first = initial_items[0]
+            company = first.get("company", {}).get("name") if isinstance(first.get("company"), dict) else first.get("company_name", "N/A")
+            monitor_status["latest_internship"] = f"{first.get('title')} ({company})"
+
     logger.info(f"Initial sync complete: tracking {len(known_ids)} existing internships.")
 
     if initial_items:
         first = initial_items[0]
-        logger.info(f"Latest existing: [{first.get('id')}] {first.get('title')} ({first.get('company', {}).get('name', 'N/A')})")
+        logger.info(f"Latest existing: [{first.get('id')}] {first.get('title')}")
 
     if single_run:
-        logger.info("Single run flag set. Exiting.")
+        logger.info("Single run flag set. Exiting background loop.")
         return
 
     while True:
@@ -219,6 +321,11 @@ def run_monitor(single_run=False):
                 continue
 
             current_ids = {item["id"] for item in current_items if "id" in item}
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            with status_lock:
+                monitor_status["last_check_time"] = now_str
+                monitor_status["total_tracked"] = len(current_ids)
 
             # Check for brand new internship IDs
             new_ids = current_ids - known_ids
@@ -230,12 +337,14 @@ def run_monitor(single_run=False):
 
                 send_email_alert(new_items)
                 known_ids.update(new_ids)
+
+                with status_lock:
+                    first_new = new_items[0]
+                    company = first_new.get("company", {}).get("name") if isinstance(first_new.get("company"), dict) else first_new.get("company_name", "N/A")
+                    monitor_status["latest_internship"] = f"{first_new.get('title')} ({company})"
             else:
                 logger.debug(f"Check completed: no new internships. (Total tracked: {len(known_ids)})")
 
-        except KeyboardInterrupt:
-            logger.info("Monitor stopped by user.")
-            break
         except Exception as e:
             logger.error(f"Unexpected error in monitor loop: {e}")
             time.sleep(10)
@@ -267,11 +376,21 @@ def send_test_email():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="VTU Internship Monitor")
     parser.add_argument("--test-email", action="store_true", help="Send a test email to verify credentials")
-    parser.add_argument("--once", action="store_true", help="Run a single fetch check and exit")
+    parser.add_argument("--once", action="store_true", help="Run a single fetch check and exit without starting Flask")
+    parser.add_argument("--no-server", action="store_true", help="Run monitor in main thread without starting Flask web server")
     args = parser.parse_args()
 
     if args.test_email:
         send_test_email()
+    elif args.once:
+        run_monitor(single_run=True)
+    elif args.no_server:
+        run_monitor(single_run=False)
     else:
-        run_monitor(single_run=args.once)
+        # Start background monitor in a daemon thread
+        monitor_thread = threading.Thread(target=run_monitor, daemon=True)
+        monitor_thread.start()
 
+        # Run Flask web server to satisfy Render's port binding requirement
+        logger.info(f"🌐 Starting Flask web server on port {PORT} for Render port binding...")
+        app.run(host="0.0.0.0", port=PORT)

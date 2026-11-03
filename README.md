@@ -74,35 +74,35 @@ python monitor.py
 
 ---
 
-## ☁️ Step 4: Deploying 24/7 for Free
+## ☁️ Step 4: Deploying 24/7 for Free on Render
 
-### Option A: Render (Recommended Background Worker)
+Render's Free Tier allows deploying this monitor as a **Web Service** (using the built-in lightweight Flask server that binds to Render's port) or as a **Background Worker**.
 
-1. **Push to GitHub**:
+### Deploying as a Web Service (Recommended for Free Tier)
+
+1. **Push your code to GitHub**:
    ```bash
-   git init
    git add .
-   git commit -m "Initial commit for VTU Internship Monitor"
-   # Create a repo on github.com and link it:
-   git remote add origin https://github.com/<your-username>/vtu-internship-monitor.git
-   git push -u origin main
+   git commit -m "Add Flask server for Render Web Service deployment"
+   git push origin main
    ```
-   *(Note: `.env` is ignored by `.gitignore` so your passwords stay private).*
 
-2. **Set up on Render**:
-   - Go to [Render.com](https://render.com) and sign in.
-   - Click **New +** > **Background Worker**.
-   - Connect your GitHub repository.
-   - Configure the worker:
+2. **Create Web Service on Render**:
+   - Go to your [Render Dashboard](https://dashboard.render.com).
+   - Click **New +** > **Web Service**.
+   - Connect your GitHub repository (`vtu_internship`).
+   - Configure settings:
      - **Name**: `vtu-internship-monitor`
      - **Runtime**: `Python 3`
      - **Build Command**: `pip install -r requirements.txt`
      - **Start Command**: `python monitor.py`
-   - In the **Environment Variables** section, add:
+     - **Instance Type**: `Free`
+   - In **Environment Variables**, add:
      - `SENDER_EMAIL` = `your_actual_gmail@gmail.com`
      - `SENDER_PASSWORD` = `your_16_character_app_password`
      - `RECIPIENT_EMAIL` = `prateekpkini2005@gmail.com`
      - `CHECK_INTERVAL_SECONDS` = `60`
-   - Click **Create Background Worker**.
+   - Click **Deploy Web Service**.
 
-Render will now keep the script running in the background 24/7. Whenever a new internship drops, an alert will hit your inbox immediately!
+Render will build the project, bind to the port, and keep the monitor running. You can visit the public URL assigned by Render to view your live monitoring status and health dashboard!
+
